@@ -1,4 +1,4 @@
-const CACHE_NAME = 'slt-20260317170956';
+const CACHE_NAME = 'slt-20260317173438';
 const PRECACHE = [
   './',
   './index.html',

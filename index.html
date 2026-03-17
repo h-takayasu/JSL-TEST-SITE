@@ -3,6 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="favicon.ico">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#8BC34A">
 <title>手話通訳士試験 問題集</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap');
@@ -91,9 +96,9 @@ body{font-family:var(--font-main);background:var(--bg-secondary);color:var(--tex
   <div class="password-page">
     <svg width="80" height="80" viewBox="0 0 80 80" style="margin-bottom:16px"><rect x="35" y="50" width="10" height="20" rx="2" fill="var(--trunk)"/><circle cx="40" cy="34" r="22" fill="#97C459"/><circle cx="28" cy="28" r="15" fill="#7DB343"/><circle cx="52" cy="30" r="16" fill="#7DB343"/><circle cx="40" cy="20" r="13" fill="#8BC34A"/><circle cx="48" cy="38" r="5" fill="#E24B4A"/><circle cx="48" cy="38" r="2" fill="#F09595" opacity=".6"/><circle cx="33" cy="32" r="4.5" fill="#E24B4A"/><circle cx="33" cy="32" r="1.8" fill="#F09595" opacity=".6"/></svg>
     <h1>手話通訳士試験 問題集</h1>
-    <p class="subtitle">パスワードを入力してください</p>
-    <div class="pw-wrap"><input type="password" id="pw-in" placeholder="パスワード" onkeydown="if(event.key==='Enter')ckPw()"/><button class="btn-s" onclick="ckPw()">入る</button></div>
-    <p class="pw-err" id="pw-err">パスワードが違います</p>
+    <p class="subtitle">チケットコードを入力してください</p>
+    <div class="pw-wrap"><input type="password" id="pw-in" placeholder="チケットコード" onkeydown="if(event.key==='Enter')ckPw()"/><button class="btn-s" onclick="ckPw()">入る</button></div>
+    <p class="pw-err" id="pw-err">チケットコードが無効です</p>
   </div>
 </div>
 
@@ -196,29 +201,42 @@ body{font-family:var(--font-main);background:var(--bg-secondary);color:var(--tex
 <script>
 let WD=[],PD=[],WG=[],PG=[],AY=[],CMT=null;
 let userPw='';
+let masterCryptoKey=null;
 const PBKDF2_IT=100000,SALT_SZ=16,NONCE_SZ=12;
 let cType='written',sGenres=new Set(['all']),sYears=new Set(['all']),quiz=[],qi=0,selC=null,ans=false;
 
-async function decryptResp(resp,password){
-  const buf=await resp.arrayBuffer();
-  const bytes=new Uint8Array(buf);
-  const salt=bytes.slice(0,SALT_SZ);
-  const nonce=bytes.slice(SALT_SZ,SALT_SZ+NONCE_SZ);
-  const ct=bytes.slice(SALT_SZ+NONCE_SZ);
-  const enc=new TextEncoder();
-  const keyMat=await crypto.subtle.importKey('raw',enc.encode(password),{name:'PBKDF2'},false,['deriveBits','deriveKey']);
-  const key=await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:PBKDF2_IT,hash:'SHA-256'},keyMat,{name:'AES-GCM',length:256},false,['decrypt']);
-  return await crypto.subtle.decrypt({name:'AES-GCM',iv:nonce},key,ct);
+async function sha256hex(str){
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
-async function decryptFile(resp,password){return decryptResp(resp,password);}
+
+async function resolveMasterKey(ticket){
+  const hash=(await sha256hex(ticket)).slice(0,12);
+  const resp=await fetch('data/keys/k_'+hash+'.enc');
+  if(!resp.ok)throw new Error('invalid ticket');
+  const buf=new Uint8Array(await resp.arrayBuffer());
+  const salt=buf.slice(0,SALT_SZ);
+  const nonce=buf.slice(SALT_SZ,SALT_SZ+NONCE_SZ);
+  const ct=buf.slice(SALT_SZ+NONCE_SZ);
+  const keyMat=await crypto.subtle.importKey('raw',new TextEncoder().encode(ticket),{name:'PBKDF2'},false,['deriveBits','deriveKey']);
+  const ticketKey=await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:PBKDF2_IT,hash:'SHA-256'},keyMat,{name:'AES-GCM',length:256},false,['decrypt']);
+  const mkRaw=await crypto.subtle.decrypt({name:'AES-GCM',iv:nonce},ticketKey,ct);
+  masterCryptoKey=await crypto.subtle.importKey('raw',mkRaw,{name:'AES-GCM',length:256},false,['decrypt']);
+}
+
+async function decryptWithMK(resp){
+  const buf=new Uint8Array(await resp.arrayBuffer());
+  const nonce=buf.slice(0,NONCE_SZ);
+  const ct=buf.slice(NONCE_SZ);
+  return await crypto.subtle.decrypt({name:'AES-GCM',iv:nonce},masterCryptoKey,ct);
+}
 
 async function loadXL(){
   try{
     let xlBuf;
-    // 暗号化ファイルを試す → なければ平文にフォールバック
     const encResp=await fetch('data/question/question_list.xlsx.enc');
-    if(encResp.ok&&userPw){
-      xlBuf=await decryptFile(encResp,userPw);
+    if(encResp.ok&&masterCryptoKey){
+      xlBuf=await decryptWithMK(encResp);
     }else{
       const plainResp=await fetch('data/question/question_list.xlsx');
       xlBuf=await plainResp.arrayBuffer();
@@ -233,10 +251,9 @@ async function loadXL(){
     const ys=new Set([...WD.map(q=>q.year),...PD.map(q=>q.year)]);
     AY=[...ys].sort((a,b)=>parseInt(b)-parseInt(a));
     document.getElementById('top-cnt').textContent=`筆記 ${WD.length}問 ／ 実技 ${PD.length}問`;
-    // comments.json も同様
     try{
       const cmEnc=await fetch('data/comments.json.enc');
-      if(cmEnc.ok&&userPw){const cmBuf=await decryptResp(cmEnc,userPw);const dec=new TextDecoder();CMT=JSON.parse(dec.decode(cmBuf));}
+      if(cmEnc.ok&&masterCryptoKey){const cmBuf=await decryptWithMK(cmEnc);const dec=new TextDecoder();CMT=JSON.parse(dec.decode(cmBuf));}
       else{const cmPlain=await fetch('data/comments.json');CMT=await cmPlain.json();}
     }catch(e){console.warn('comments load failed',e);}
   }catch(e){console.error(e);document.getElementById('top-cnt').textContent='データ読み込みエラー';throw e;}
@@ -248,7 +265,7 @@ function sLD(d){localStorage.setItem('slt-ld',JSON.stringify(d));}
 function gRS(){try{return JSON.parse(localStorage.getItem('slt-rs'))||{};}catch{return{};}}
 function sRS(s){localStorage.setItem('slt-rs',JSON.stringify(s));}
 
-async function ckPw(){const pw=document.getElementById('pw-in').value;if(!pw){document.getElementById('pw-err').style.display='block';return;}document.getElementById('pw-err').style.display='none';userPw=pw;document.getElementById('ld').style.display='flex';try{await loadXL();if(WD.length===0&&PD.length===0)throw new Error('no data');localStorage.setItem('slt-a','1');localStorage.setItem('slt-p',btoa(pw));go('pg-top');}catch(e){console.error(e);document.getElementById('ld').style.display='none';userPw='';WD=[];PD=[];WG=[];PG=[];AY=[];CMT=null;document.getElementById('pw-err').textContent='パスワードが違います';document.getElementById('pw-err').style.display='block';}}
+async function ckPw(){const pw=document.getElementById('pw-in').value;if(!pw){document.getElementById('pw-err').style.display='block';return;}document.getElementById('pw-err').style.display='none';userPw=pw;document.getElementById('ld').style.display='flex';try{await resolveMasterKey(pw);await loadXL();if(WD.length===0&&PD.length===0)throw new Error('no data');localStorage.setItem('slt-a','1');localStorage.setItem('slt-p',btoa(pw));go('pg-top');}catch(e){console.error(e);document.getElementById('ld').style.display='none';userPw='';masterCryptoKey=null;WD=[];PD=[];WG=[];PG=[];AY=[];CMT=null;document.getElementById('pw-err').textContent='チケットコードが無効です';document.getElementById('pw-err').style.display='block';}}
 
 function go(id){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById(id).classList.add('active');window.scrollTo(0,0);if(id==='pg-top')buildTop();if(id==='pg-stats')buildStats();if(id==='pg-progress')buildProgress();}
 
@@ -264,10 +281,10 @@ function tp(g,v){const s=g==='g'?sGenres:sYears;if(v==='all'){s.clear();s.add('a
 function filt(){return dft().filter(q=>(sGenres.has('all')||sGenres.has(q.type))&&(sYears.has('all')||sYears.has(q.year)));}
 function updBtn(){const n=filt().length;document.getElementById('start-btn').textContent=`出題開始（${n}問）`;document.getElementById('start-btn').disabled=n===0;}
 
-function startQuiz(){let f=filt();if(!f.length)return;if(document.getElementById('opt-so').checked)f=[...f].sort(()=>Math.random()-.5);quiz=f;qi=0;go('pg-q');renderQ();}
+function startQuiz(){let f=filt();if(!f.length)return;if(document.getElementById('opt-so').checked)f=[...f].sort(()=>Math.random()-.5);if(cType==='written'){const rs=gRS(),fIds=new Set(f.map(q=>q.id+'-'+q.year));let rv=WD.filter(q=>{const rk=`written-${q.id}-${q.year}`;return(rs[rk]||0)>=1&&!fIds.has(q.id+'-'+q.year);});if(rv.length){rv=[...rv].sort(()=>Math.random()-.5);let ri=0;for(let i=f.length-1;i>=0&&ri<rv.length;i--){if(Math.random()<0.2){f.splice(i+1,0,rv[ri]);ri++;}}}}quiz=f;qi=0;go('pg-q');renderQ();}
 
 function renderQ(){
-  const q=quiz[qi],isW=cType==='written',rs=gRS(),rk=`${cType}-${q.id}-${q.year}`,rv=rs[rk]||0,isR=rv>=2;
+  const q=quiz[qi],isW=cType==='written',rs=gRS(),rk=`${cType}-${q.id}-${q.year}`,rv=rs[rk]||0,isR=rv>=1;
   document.getElementById('qp').textContent=`${qi+1} / ${quiz.length}問`;
   document.getElementById('qt').innerHTML=`<span class="tag tag-g">${q.type}</span><span class="tag tag-gr">${q.year}</span>`;
   const rt=document.getElementById('qr'),rn=document.getElementById('qn');
@@ -290,7 +307,7 @@ function nextQ(){qi++;if(qi>=quiz.length){const d=gLD(),sa=d.answers.slice(-quiz
 
 function buildStats(){
   const d=gLD(),wa=d.answers.filter(a=>a.correct!==null),cc=wa.filter(a=>a.correct).length,tc=wa.length,rate=tc?Math.round(cc/tc*100):0;
-  const rs=gRS(),rc=Object.values(rs).filter(v=>v>=2).length;
+  const rs=gRS(),rc=Object.values(rs).filter(v=>v>=1).length;
   const C=2*Math.PI*65,f=C*rate/100;
   document.getElementById('sd').innerHTML=`<svg width="160" height="160" viewBox="0 0 160 160"><circle cx="80" cy="80" r="65" fill="none" stroke="var(--border-color)" stroke-width="12"/><circle cx="80" cy="80" r="65" fill="none" stroke="var(--green-200)" stroke-width="12" stroke-dasharray="${f} ${C-f}" stroke-dashoffset="${C*.25}" stroke-linecap="round" style="transition:stroke-dasharray 1s ease-out"/><text x="80" y="72" text-anchor="middle" class="dlabel" style="font-size:32px;font-weight:500;fill:var(--text-primary)">${rate}%</text><text x="80" y="95" text-anchor="middle" class="dlabel" style="font-size:13px;fill:var(--text-secondary)">${cc} / ${tc}問</text></svg><div style="display:flex;justify-content:center;gap:20px;margin-top:8px"><span style="font-size:12px;color:var(--text-secondary)">回答済み: ${tc}問</span><span style="font-size:12px;color:var(--amber-600)">復習残: ${rc}問</span></div>`;
   document.getElementById('st').innerHTML=`<span class="ctab active" onclick="stab('g')">ジャンル別</span><span class="ctab" onclick="stab('y')">年度別</span>`;
@@ -366,7 +383,8 @@ function buildProgress(){
   document.getElementById('prog-body').innerHTML=h;
 }
 
-window.addEventListener('DOMContentLoaded',async()=>{const sa=localStorage.getItem('slt-a'),sp=localStorage.getItem('slt-p');if(sa==='1'&&sp){userPw=atob(sp);try{await loadXL();if(WD.length>0||PD.length>0){go('pg-top');return;}}catch(e){console.warn('auto-login failed',e);}}document.getElementById('ld').style.display='none';});
+window.addEventListener('DOMContentLoaded',async()=>{const sa=localStorage.getItem('slt-a'),sp=localStorage.getItem('slt-p');if(sa==='1'&&sp){userPw=atob(sp);try{await resolveMasterKey(userPw);await loadXL();if(WD.length>0||PD.length>0){go('pg-top');return;}}catch(e){console.warn('auto-login failed',e);masterCryptoKey=null;}}document.getElementById('ld').style.display='none';});
+if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js').catch(()=>{});}
 </script>
 </body>
 </html>

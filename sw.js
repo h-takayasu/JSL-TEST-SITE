@@ -1,8 +1,13 @@
-const CACHE_NAME = 'slt-20260317173438';
+const CACHE_NAME = 'slt-20260318104716';
 const PRECACHE = [
   './',
   './index.html',
   './favicon.ico',
+  './manifest.json',
+  './data/icon-192.png',
+  './data/icon-512.png',
+  './data/question/question_list.xlsx.enc',
+  './data/comments.json.enc',
   'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'
 ];
 
@@ -36,13 +41,17 @@ self.addEventListener('fetch', e => {
           url.endsWith('.json') ||
           url.endsWith('.enc') ||
           url.endsWith('.jpg') ||
-          url.endsWith('.png');
+          url.endsWith('.png') ||
+          url.endsWith('.ico');
         if (shouldCache) {
           const clone = resp.clone();
           caches.open(CACHE_NAME).then(cache => cache.put(e.request, clone));
         }
         return resp;
-      }).catch(() => cached);
+      }).catch(() => {
+        if (cached) return cached;
+        return new Response('Offline', { status: 503, statusText: 'Offline' });
+      });
     })
   );
 });
